@@ -20,6 +20,7 @@ import hashlib
 import importlib
 import importlib.machinery
 import importlib.util
+import json
 import os
 import sys
 import textwrap
@@ -27,6 +28,7 @@ import traceback
 import warnings
 import zipfile
 from datetime import datetime, timedelta
+from types import ModuleType
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Union
 
 from sqlalchemy.exc import OperationalError
@@ -43,7 +45,7 @@ from airflow.exceptions import (
     SerializedDagNotFound,
 )
 from airflow.stats import Stats
-from airflow.utils import timezone
+from airflow.utils import timezone, yaml
 from airflow.utils.dag_cycle_tester import check_cycle
 from airflow.utils.file import correct_maybe_zipped, list_py_file_paths, might_contain_dag
 from airflow.utils.log.logging_mixin import LoggingMixin
@@ -290,15 +292,47 @@ class DagBag(LoggingMixin):
             self.log.exception(e)
             return []
 
-        if not zipfile.is_zipfile(filepath):
-            mods = self._load_modules_from_file(filepath, safe_mode)
-        else:
+        if zipfile.is_zipfile(filepath):
             mods = self._load_modules_from_zip(filepath, safe_mode)
+        elif not filepath.endswith('.py'):
+            mods = self._load_modules_from_yaml_or_json(filepath)
+        else:
+            mods = self._load_modules_from_file(filepath, safe_mode)
 
         found_dags = self._process_modules(filepath, mods, file_last_changed_on_disk)
 
         self.file_last_changed[filepath] = file_last_changed_on_disk
         return found_dags
+
+    def _load_modules_from_yaml_or_json(self, filepath):
+        try:
+            # TODO: should we timeout the load as well?
+            with open(filepath) as file:
+                if filepath.endswith('.json'):
+                    parsed = json.load(file)
+                else:
+                    parsed = yaml.load(stream=file, Loader=yaml.FullLoader)
+        except (yaml.YAMLError, ValueError) as e:
+            self.log.exception('failed to load json/yaml file %s', filepath)
+            self.import_errors[filepath] = str(e)
+            return []
+        builder = parsed.get('builder')
+        if not type(builder) == str:
+            self.log.warning('invalid builder parameter (%s) in %s', str(builder), filepath)
+            return []
+        imported_builder = self.import_py_file(builder)
+        if len(imported_builder) == 0:
+            return []
+        top_level_items = imported_builder[0].__dict__.items()
+        builder_func = [value for (name, value) in top_level_items if callable(value) and name == 'make_dag']
+        if len(builder_func) != 1:
+            return []
+
+        fake_module = ModuleType("fake_module")
+        fake_module.__file__ = filepath
+        # verification of this indeed being a DAG takes place in _process_dags
+        fake_module.generated_dag = builder_func[0](parsed)
+        return [fake_module]
 
     def _load_modules_from_file(self, filepath, safe_mode):
         if not might_contain_dag(filepath, safe_mode):
@@ -307,7 +341,9 @@ class DagBag(LoggingMixin):
                 self.has_logged = True
                 self.log.info("File %s assumed to contain no DAGs. Skipping.", filepath)
             return []
+        return self.import_py_file(filepath)
 
+    def import_py_file(self, filepath):
         self.log.debug("Importing %s", filepath)
         org_mod_name, _ = os.path.splitext(os.path.split(filepath)[-1])
         path_hash = hashlib.sha1(filepath.encode('utf-8')).hexdigest()

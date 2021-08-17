@@ -133,7 +133,7 @@ class TestDagBag:
         """
         test that we're able to parse file that contains multi-byte char
         """
-        with NamedTemporaryFile() as f:
+        with NamedTemporaryFile(suffix='.py') as f:
             f.write('\u3042'.encode())  # write multi-byte char (hiragana)
             f.flush()
 
@@ -154,8 +154,8 @@ class TestDagBag:
             my_dag = my_flow()  # noqa
 
         source_lines = [line[12:] for line in inspect.getsource(create_dag).splitlines(keepends=True)[1:]]
-        with NamedTemporaryFile("w+", encoding="utf8") as tf_1, NamedTemporaryFile(
-            "w+", encoding="utf8"
+        with NamedTemporaryFile("w+", encoding="utf8", suffix='.py') as tf_1, NamedTemporaryFile(
+            "w+", encoding="utf8", suffix='.py'
         ) as tf_2:
             tf_1.writelines(source_lines)
             tf_2.writelines(source_lines)
@@ -346,7 +346,7 @@ class TestDagBag:
         """
         # write source to file
         source = textwrap.dedent(''.join(inspect.getsource(create_dag).splitlines(True)[1:-1]))
-        with NamedTemporaryFile() as f:
+        with NamedTemporaryFile(suffix='.py') as f:
             f.write(source.encode('utf8'))
             f.flush()
 
